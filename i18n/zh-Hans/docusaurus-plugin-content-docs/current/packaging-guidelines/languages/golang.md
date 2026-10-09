@@ -76,17 +76,15 @@ Conflicts:      go(github.com/olekukonko/tablewriter) >= 1.0.0
 
 ## 依赖关系
 
-库软件包需要在 RPM Spec 中的 BuildRequires 和 Requires 列出其依赖的所有其它 Go 库。这些依赖项在构建时需要可用以运行测试，在安装时也需要可用以便其他软件包进行构建。
+自动生成 `Provides` 不会生成 `BuildRequires` 或 `Requires`。库软件包必须继续在 RPM Spec 的 `BuildRequires` 和 `Requires` 中列出其依赖的所有其它 Go 库。这些依赖项在构建时需要可用以运行测试，在安装时也需要可用以便其它软件包进行构建。
 
-在编写 Go 库依赖的时候，必须使用规定的虚拟依赖，格式为 `go(<import path>)`。
+声明 Go 库依赖时，必须使用规定的虚拟依赖格式: `go(<import path>)`。
 
-其中，库软件包本身必须要显式在 RPM Spec 内写出自己提供的导入路径和版本，例如:
+对于最终安装源码树中成功发现的每个合格 Go 包，`%go_generate_provides` 会创建一个 `.goipath` 标记。生成器会排除名称为 `main` 的 Go 包、没有普通 Go、Cgo 或汇编源码文件的 Go 包、位于 `example` 或 `examples` 目录下的 Go 包，以及 `go list` 报告错误的 Go 包。RPM Go 文件属性生成器会读取最终生成的标记，并自动为拥有相应标记的 RPM 二进制软件包生成一个带版本的 `go(<import path>)` 虚拟提供。对于自动生成机制覆盖的规范导入路径，库软件包不得手动编写 `Provides` 条目。
 
-```specfile
-Provides:       go(github.com/clipperhouse/uax29/v2) = %{version}
-```
+只有生成器无法从打包的 `.goipath` 标记推导出的有意虚拟提供，才仍需手动编写 `Provides`。典型情况包括仅通过兼容性符号链接保留的旧导入路径别名，以及没有可导入 Go 包目录但需要有意提供的虚拟模块根。打包者必须确认手写的虚拟提供不会被自动重复生成。
 
-这样可以方便的被其它库软件包引用:
+其它库软件包可以用相同方式引用这些自动生成的虚拟提供:
 
 ```specfile
 BuildRequires:  go(github.com/clipperhouse/stringish)
@@ -100,11 +98,16 @@ Requires:       go(github.com/clipperhouse/stringish)
 
 * `go` - 提供 Go 程序本身。
 
-* `go-rpm-macros` - 提供打包 Go 库所需的一系列 RPM 宏。例如，对于 `/usr/share/gocode/src` 这个路径，可以直接使用 `%{go_sys_gopath}` 代替。
+* `go-rpm-macros` - 提供打包 Go 库所需的 RPM 宏和 Go 文件属性生成器。例如，对于 `/usr/share/gocode/src` 这个路径，可以直接使用 `%{go_sys_gopath}` 代替。
 
 ## 当上游迁移仓库地址
 
-有些时候，上游软件包可能会从一个托管商迁移到另一个托管商。此时需要重命名软件包，并且提供新的 Provides，还需要在构建过程中创建一个兼容性的符号链接。
+有时，上游软件包会将仓库从一个托管服务商迁移到另一个托管服务商。此时，软件包必须按照新的规范导入路径重命名。如果现有使用者仍依赖旧导入路径，`%install` 阶段必须创建从旧路径指向规范路径的兼容性符号链接。自动生成器会为规范路径下可导入的 Go 包生成虚拟提供，但不会根据兼容性符号链接推导别名。因此，RPM Spec 必须为现有使用者仍然需要的每个旧导入路径兼容性别名手动声明带版本的 `Provides` 条目:
+
+```specfile
+# Preserve the legacy import path for existing consumers.
+Provides:       go(example.org/legacy/project) = %{version}
+```
 
 ## 自动化引入
 
@@ -133,6 +136,45 @@ openRuyi 目前有一个将 Go 库/程序引入的小程序 go2spec。这个小�
 ### %__go
 
 此宏为系统中安装的 go 可执行文件的名称。
+
+### %go_generate_provides
+
+该宏扫描最终安装源码树中的一个 Go 导入根，并为成功发现的每个合格 Go 包写入 `.goipath` 标记。该宏本身不会输出 `Provides` 行。在 RPM 依赖生成阶段，RPM Go 文件属性生成器会将每个打包进 RPM 的标记转换为带版本的 `go(<import path>)` 虚拟提供。
+
+`%buildsystem_golangmodules_install` 会在复制源码树后自动调用该宏。无论是直接调用 `%buildsystem_golangmodules_install`，还是保留 `golangmodules` 的默认安装阶段，RPM Spec 都不得再为同一导入根调用 `%go_generate_provides`。
+
+如果完整自定义的 `%install` 没有调用 `%buildsystem_golangmodules_install`，则必须先完成 Go 源码树的复制、移动和裁剪，再调用生成器:
+
+```specfile
+%go_generate_provides -i %{go_import_path} -v %{version}
+```
+
+调用生成器后，不得再添加或删除可导入的 Go 包，否则标记将无法反映最终打包的源码树。此后可以继续执行非 Go 源码的安装操作。如果自定义安装过程处理多个独立导入根，则必须为每个导入根分别调用一次该宏，并显式传入 `-i` 和 `-v` 参数。
+
+#### go_submodules
+
+默认情况下，每个自动生成的虚拟提供使用通过 `-v` 传入的版本。`%buildsystem_golangmodules_install` 会传入 `%{version}`。如果源码树包含独立发布且版本不同的嵌套 Go 模块，则必须在调用生成器前定义 `go_submodules`:
+
+```specfile
+# Record the independent versions of nested Go modules.
+%global go_submodules %{expand:
+# PATH VERSION
+example.org/project/sub 2.3.4
+example.org/project/sub/nested 3.4.5
+
+# This module may be absent on some architectures.
+example.org/project/archonly 4.5.6
+}
+```
+
+对于每个自动生成的虚拟提供，路径上距离最近的已声明模块祖先决定其版本。当导入路径与 `PATH` 完全相同，或者以 `PATH/` 开头时，映射才会匹配。例如，`example.org/project/sub` 会匹配 `example.org/project/sub/child`，但不会匹配 `example.org/project/submarine`。表中各行的顺序不影响结果。没有匹配行的导入路径继续使用通过 `-v` 传入的版本。
+
+该表必须符合以下要求:
+
+* 每个非空、非注释行必须恰好包含 `PATH` 和 `VERSION` 两个字段，字段之间使用空格或制表符分隔。可以使用行首和行尾空白、空行，以及首个非空白字符为 `#` 的整行注释。不得使用行尾注释，因为注释内容会构成额外字段。
+* 如果某个构建中不存在对应的 Go 包，有效映射可以不匹配任何路径。所有行仍必须在每个架构上保持有效。字段缺失或多余、展开后的路径重复、RPM 宏标记未解析，以及路径或版本无效，都会导致生成失败。
+* `PATH` 支持 ASCII 字母、数字、`.`、`_`、`~`、`+`、`-` 和 `/`。路径不得以 `/` 开头或结尾，不得包含 `//`，也不得包含 `.` 或 `..` 路径组件。不支持通配符。
+* `VERSION` 支持 ASCII 字母、数字、`.`、`_`、`+`、`~` 和 `^`，并且必须至少包含一个字母或数字。RPM Spec 必须仅填写 RPM `Version` 值，不得包含 `Epoch` 或 `Release` 后缀。例如，应使用 `2.3.4`，而不是 `2.3.4-1`。
 
 ### 定义宏
 

@@ -76,17 +76,15 @@ Conflicts:      go(github.com/olekukonko/tablewriter) >= 1.0.0
 
 ## Dependencies
 
-Library packages must list all required Go library dependencies in both the `BuildRequires` and `Requires` sections of the RPM Spec. These dependencies must be available at build time for running tests, and at install time so that other packages can build against them.
+Automatic `Provides` generation does not generate `BuildRequires` or `Requires`. Library packages MUST continue to list all required Go library dependencies in both the `BuildRequires` and `Requires` sections of the RPM Spec. These dependencies must be available at build time to run tests and at install time so that other packages can build against them.
 
-When declaring Go library dependencies, you must use the required virtual dependency format: `go(<import path>)`
+When declaring Go library dependencies, you MUST use the required virtual dependency format: `go(<import path>)`.
 
-At the same time, each library package must explicitly declare the import path and version it provides in the RPM Spec. For example:
+For each eligible Go library package discovered in the final installed source tree, `%go_generate_provides` creates a `.goipath` marker. It excludes `main` packages, packages without normal Go, Cgo, or assembly source files, packages below `example` or `examples` directories, and packages that `go list` reports as errors. The RPM Go file attribute generator reads the resulting markers and automatically emits one versioned `go(<import path>)` capability for the RPM binary package that owns each marker. Library packages MUST NOT manually declare `Provides` entries for canonical import paths covered by automatic generation.
 
-```specfile
-Provides:       go(github.com/clipperhouse/uax29/v2) = %{version}
-```
+Handwritten `Provides` entries remain necessary only for intentional capabilities that the generator cannot derive from packaged `.goipath` markers. Examples include a legacy import-path alias preserved only by a compatibility symlink and an intentional virtual module-root capability with no importable package directory. Packagers MUST verify that a handwritten capability is not already generated automatically.
 
-This explicit declaration allows other library packages to reference it conveniently:
+Other library packages can reference the automatically generated capabilities in the same way:
 
 ```specfile
 BuildRequires:  go(github.com/clipperhouse/stringish)
@@ -100,11 +98,16 @@ The following two build dependencies are mandatory:
 
 * `go` — provides the Go compiler and toolchain itself.
 
-* `go-rpm-macros` — provides a set of RPM macros required for packaging Go libraries. For example, you can reference the path `/usr/share/gocode/src` via `%{go_sys_gopath}`.
+* `go-rpm-macros` — provides the RPM macros and Go file attribute generator required for packaging Go libraries. For example, you can reference the path `/usr/share/gocode/src` via `%{go_sys_gopath}`.
 
 ## When Upstream Migrates to a New Repository Location
 
-In some cases, an upstream package may move from one hosting provider to another. In such situations, you should rename the package accordingly, add new `Provides` entries, and create a compatibility symlink during the build process.
+In some cases, an upstream package may move from one hosting provider to another. The package MUST be renamed for the new canonical import path. If existing consumers still require the legacy import path, the `%install` section MUST create a compatibility symlink from the legacy path to the canonical path. The automatic generator emits capabilities for importable Go packages under the canonical path, but it does not infer aliases from compatibility symlinks. The RPM Spec MUST therefore declare a versioned `Provides` entry manually for each legacy import-path alias that existing consumers still require:
+
+```specfile
+# Preserve the legacy import path for existing consumers.
+Provides:       go(example.org/legacy/project) = %{version}
+```
 
 ## Automated Bootstrapping
 
@@ -133,6 +136,45 @@ This macro performs two tasks:
 ### %__go
 
 This macro expands to the name of the `go` executable installed on the system.
+
+### %go_generate_provides
+
+This macro scans one Go import root in the final installed source tree and writes a `.goipath` marker for each eligible Go library package it discovers. The macro does not emit `Provides` lines itself. During RPM dependency generation, the RPM Go file attribute generator converts each packaged marker into a versioned `go(<import path>)` capability.
+
+`%buildsystem_golangmodules_install` invokes this macro automatically after copying the source tree. A spec that uses `%buildsystem_golangmodules_install`, either directly or through the default `golangmodules` install phase, MUST NOT invoke `%go_generate_provides` again for the same import root.
+
+A full custom `%install` that does not invoke `%buildsystem_golangmodules_install` MUST finish copying, relocating, and pruning the Go source tree before invoking the generator:
+
+```specfile
+%go_generate_provides -i %{go_import_path} -v %{version}
+```
+
+Packagers MUST NOT add or remove importable Go packages after invoking the generator, because the markers would no longer match the packaged source tree. Non-Go installation work MAY follow. If a custom install handles multiple distinct import roots, it MUST invoke the macro once for each root with explicit `-i` and `-v` arguments.
+
+#### go_submodules
+
+By default, each generated capability uses the version passed with `-v`. `%buildsystem_golangmodules_install` passes `%{version}`. If the source tree contains nested Go modules released at different versions, the spec MUST define `go_submodules` before invoking the generator:
+
+```specfile
+# Record the independent versions of nested Go modules.
+%global go_submodules %{expand:
+# PATH VERSION
+example.org/project/sub 2.3.4
+example.org/project/sub/nested 3.4.5
+
+# This module may be absent on some architectures.
+example.org/project/archonly 4.5.6
+}
+```
+
+For each generated capability, the nearest declared module ancestor determines its version. A mapping matches when the import path is exactly `PATH` or begins with `PATH/`. For example, `example.org/project/sub` matches `example.org/project/sub/child`, but it does not match `example.org/project/submarine`. Table order does not matter. Import paths without a matching row retain the version passed with `-v`.
+
+The table has the following requirements:
+
+* Each non-empty, non-comment line MUST contain exactly two fields, `PATH` and `VERSION`, separated by spaces or tabs. Leading and trailing whitespace, blank lines, and full-line comments whose first non-whitespace character is `#` are allowed. Inline comments MUST NOT be used because they form an extra field.
+* A valid mapping MAY remain unused when the corresponding Go package is absent from a particular build. All rows MUST still be valid on every architecture. Missing or extra fields, duplicate expanded paths, unresolved RPM macro tokens, and invalid paths or versions cause generation to fail.
+* `PATH` supports ASCII letters, digits, `.`, `_`, `~`, `+`, `-`, and `/`. It MUST NOT begin or end with `/`, contain `//`, or contain `.` or `..` path components. Wildcards are not supported.
+* `VERSION` supports ASCII letters, digits, `.`, `_`, `+`, `~`, and `^`, and MUST contain at least one letter or digit. The spec MUST provide only the RPM `Version` value, without an `Epoch` or `Release` suffix. For example, use `2.3.4`, not `2.3.4-1`.
 
 ### Macro Definitions
 

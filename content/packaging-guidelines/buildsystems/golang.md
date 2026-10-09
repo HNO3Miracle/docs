@@ -24,6 +24,20 @@ BuildRequires:  go-rpm-macros
 
 At a minimum, you should define `_name` and `go_import_path` near the top of the spec file. The former is typically the Go library's name, while the latter is usually its import path.
 
+## Install phase
+
+The default `golangmodules` install phase performs these actions in order:
+
+1. It creates `%{buildroot}%{go_sys_gopath}/%{go_import_path}`.
+2. It copies the source tree to that directory.
+3. It invokes `%go_generate_provides -i %{go_import_path} -v %{version}`.
+
+A spec that retains the default `golangmodules` install phase MUST NOT invoke `%go_generate_provides` itself. An appended `%install -a` section that installs only binaries, documentation, or other non-Go-source files also does not need an explicit invocation because the default stage runs first. An appended install section MUST NOT add or remove importable Go packages after metadata generation.
+
+Calling `%buildsystem_golangmodules_install` directly, as in the example below, performs all three actions and MUST NOT be followed by another direct invocation of `%go_generate_provides` for the same import root.
+
+A full custom `%install` replaces the default install stage. It MUST either invoke `%buildsystem_golangmodules_install` or install and finalize the Go source tree before invoking `%go_generate_provides`. See `%go_generate_provides` in the [Golang Packaging Guidelines](/docs/guide/packaging-guidelines/languages/Golang#go_generate_provides) for the invocation order and options.
+
 ## Examples
 
 Both the `golang` and `golangmodules` build systems can directly use the same common `%prep` configuration:
